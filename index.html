@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drive Screen Recorder</title>
+<style>
+:root{--bg:#f3f5f4;--panel:#fff;--ink:#17201d;--mute:#5d6b66;--line:#d6dedb;--rec:#d92d20;--ok:#157f55;--btn:#17201d;--btnink:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#101513;--panel:#18201d;--ink:#e8efec;--mute:#93a39d;--line:#2b3733;--rec:#ff6b5e;--ok:#4cc38a;--btn:#e8efec;--btnink:#101513}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,'Times New Roman',serif;padding:24px 16px}
+main{max-width:560px;margin:0 auto}
+h1{font-size:26px;margin:0 0 4px;font-weight:700}
+p.sub{color:var(--mute);margin:0 0 20px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:16px}
+label{display:block;font:600 13px system-ui,sans-serif;margin:12px 0 4px}
+input[type=text],select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:14px system-ui,sans-serif}
+.row{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;font:14px system-ui,sans-serif}
+.row label{display:flex;gap:6px;align-items:center;margin:0;font-weight:500}
+button{font:600 15px system-ui,sans-serif;padding:11px 18px;border-radius:6px;border:0;background:var(--btn);color:var(--btnink);cursor:pointer}
+button:disabled{opacity:.35;cursor:not-allowed}
+button.rec{background:var(--rec);color:#fff}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--ok);outline-offset:2px}
+.btns{display:flex;gap:10px;flex-wrap:wrap}
+#timer{font:700 54px/1 ui-monospace,Menlo,Consolas,monospace;letter-spacing:-1px;margin:4px 0 10px}
+#state{font:600 14px system-ui,sans-serif;color:var(--mute);display:flex;align-items:center;gap:8px}
+#dot{width:10px;height:10px;border-radius:50%;background:var(--mute)}
+#dot.on{background:var(--rec);animation:p 1.2s infinite}
+@keyframes p{50%{opacity:.3}}
+@media (prefers-reduced-motion:reduce){#dot.on{animation:none}}
+.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin:12px 0 6px}
+#fill{height:100%;width:0;background:var(--ok);transition:width .3s}
+.stats{font:13px system-ui,sans-serif;color:var(--mute);display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+#log{font:13px system-ui,sans-serif;color:var(--mute);margin-top:10px;min-height:20px}
+#log.err{color:var(--rec)}
+a{color:var(--ok)}
+small{color:var(--mute);font:12px system-ui,sans-serif}
+</style>
+</head>
+<body>
+<main>
+<h1>Drive Screen Recorder</h1>
+<p class="sub">Records screen and audio, and uploads it to Google Drive while you record. Nothing is saved on this device.</p>
+
+<div class="panel">
+  <label for="cid">Google OAuth Client ID</label>
+  <input type="text" id="cid" placeholder="123456-abc.apps.googleusercontent.com" autocomplete="off">
+  <small>One-time setup. See the steps in the chat.</small>
+  <label for="name">File name</label>
+  <input type="text" id="name">
+  <label for="q">Quality (higher uses more Drive space)</label>
+  <select id="q">
+    <option value="1000000">Low: 1 Mbps (about 0.45 GB per hour)</option>
+    <option value="2000000" selected>Medium: 2 Mbps (about 0.9 GB per hour)</option>
+    <option value="4000000">High: 4 Mbps (about 1.8 GB per hour)</option>
+  </select>
+  <div class="row">
+    <label><input type="checkbox" id="sys" checked> System or tab audio</label>
+    <label><input type="checkbox" id="mic" checked> Microphone</label>
+  </div>
+</div>
+
+<div class="panel">
+  <div id="timer">00:00:00</div>
+  <div id="state"><span id="dot"></span><span id="st">Ready</span></div>
+  <div class="bar"><div id="fill"></div></div>
+  <div class="stats"><span id="up">Uploaded 0 MB</span><span id="bf">Waiting 0 MB</span></div>
+  <div class="btns" style="margin-top:14px">
+    <button id="start" class="rec">Start recording</button>
+    <button id="pause" class="ghost" disabled>Pause</button>
+    <button id="end" disabled>End and finish upload</button>
+  </div>
+  <div id="log"></div>
+</div>
+</main>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script>
+const $=id=>document.getElementById(id);
+const CHUNK=16*1024*1024; // multiple of 256 KiB, required by Drive
+const store={get(k){try{return localStorage.getItem(k)||''}catch(e){return ''}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+$('cid').value=store.get('cid');
+const stamp=()=>new Date().toISOString().slice(0,16).replace(/[:T]/g,'-');
+$('name').value='Recording '+stamp();
+
+let rec,streams=[],ctx,session,pending=new Blob(),sent=0,uploading=false,stopping=false,finished=false,
+    elapsed=0,tickStart=0,tick,wake,fileId,failed=false;
+
+const log=(m,e)=>{$('log').textContent=m;$('log').className=e?'err':''};
+const mb=n=>(n/1048576).toFixed(n>1e8?0:1);
+const fmt=s=>[s/3600,s%3600/60,s%60].map(v=>String(Math.floor(v)).padStart(2,'0')).join(':');
+const ui=()=>{ $('up').textContent='Uploaded '+mb(sent)+' MB'; $('bf').textContent='Waiting '+mb(pending.size)+' MB';
+  $('fill').style.width=(sent+pending.size?100*sent/(sent+pending.size):0)+'%'; };
+
+function getToken(){
+  return new Promise((res,rej)=>{
+    if(!window.google||!google.accounts){return rej(new Error('Google sign-in script did not load. Check your connection.'))}
+    google.accounts.oauth2.initTokenClient({
+      client_id:$('cid').value.trim(),
+      scope:'https://www.googleapis.com/auth/drive.file',
+      callback:r=>r.access_token?res(r.access_token):rej(new Error(r.error||'Sign-in failed')),
+      error_callback:e=>rej(new Error(e.type||'Sign-in cancelled'))
+    }).requestAccessToken();
+  });
+}
+
+async function openSession(token,name,mime){
+  const r=await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name',{
+    method:'POST',
+    headers:{Authorization:'Bearer '+token,'Content-Type':'application/json; charset=UTF-8','X-Upload-Content-Type':mime},
+    body:JSON.stringify({name,mimeType:mime})
+  });
+  if(!r.ok)throw new Error('Drive refused the upload ('+r.status+'). Is the Drive API enabled?');
+  const loc=r.headers.get('Location');
+  if(!loc)throw new Error('Drive did not return an upload address.');
+  return loc;
+}
+
+// One PUT to the resumable session. Returns {status, range, text}
+function put(body,range){
+  return new Promise((res,rej)=>{
+    const x=new XMLHttpRequest();
+    x.open('PUT',session);
+    x.setRequestHeader('Content-Range',range);
+    x.onload=()=>res({status:x.status,range:x.getResponseHeader('Range'),text:x.responseText});
+    x.onerror=()=>rej(new Error('network'));
+    x.ontimeout=()=>rej(new Error('timeout'));
+    x.send(body);
+  });
+}
+async function serverOffset(){
+  const r=await put(null,'bytes */*');
+  if(r.status===308){const m=/bytes=0-(\d+)/.exec(r.range||'');return m?+m[1]+1:0}
+  if(r.status===200||r.status===201)return -1;
+  throw new Error('status '+r.status);
+}
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+
+async function sendChunk(blob,isLast){
+  let attempt=0;
+  for(;;){
+    try{
+      const start=sent,end=sent+blob.size-1;
+      const total=isLast?String(sent+blob.size):'*';
+      const range=blob.size?`bytes ${start}-${end}/${total}`:`bytes */${sent}`;
+      const r=await put(blob.size?blob:null,range);
+      if(r.status===308){sent+=blob.size;return null}
+      if(r.status===200||r.status===201){sent+=blob.size;return JSON.parse(r.text)}
+      throw new Error('status '+r.status);
+    }catch(e){
+      attempt++;
+      log('Connection problem, retrying ('+attempt+')… Recording continues.',true);
+      await wait(Math.min(30000,1000*attempt));
+      try{ // resync with what Drive actually received
+        const off=await serverOffset();
+        if(off>sent&&off<=sent+blob.size){blob=blob.slice(off-sent);sent=off}
+      }catch(_){}
+    }
+  }
+}
+
+async function pump(){
+  if(uploading)return;uploading=true;
+  try{
+    while(pending.size>=CHUNK){
+      const part=pending.slice(0,CHUNK);
+      pending=pending.slice(CHUNK);
+      await sendChunk(part,false);ui();
+      log('Uploading to Drive…');
+    }
+    if(stopping&&!finished){
+      finished=true;
+      st('Finishing upload…');
+      const last=pending;pending=new Blob();
+      const meta=await sendChunk(last,true);ui();
+      fileId=meta&&meta.id;
+      done();
+    }
+  }catch(e){log(e.message,true)}
+  uploading=false;
+  if(pending.size>=CHUNK||(stopping&&!finished))pump();
+}
+
+function st(t,on){$('st').textContent=t;$('dot').className=on?'on':''}
+function lockUI(running){
+  $('start').disabled=running;$('pause').disabled=!running;$('end').disabled=!running;
+  ['cid','name','q','sys','mic'].forEach(i=>$(i).disabled=running);
+}
+
+function cleanup(){
+  clearInterval(tick);streams.forEach(s=>s.getTracks().forEach(t=>t.stop()));streams=[];
+  if(ctx){ctx.close();ctx=null}
+  if(wake){wake.release().catch(()=>{});wake=null}
+  window.onbeforeunload=null;
+}
+function done(){
+  cleanup();lockUI(false);st('Saved to Google Drive');
+  const link=fileId?` <a target="_blank" rel="noopener" href="https://drive.google.com/file/d/${fileId}/view">Open in Drive</a>`:'';
+  $('log').className='';$('log').innerHTML='Done. '+mb(sent)+' MB uploaded.'+link;
+}
+
+$('start').onclick=async()=>{
+  const cid=$('cid').value.trim();
+  if(!cid){log('Enter your Google OAuth Client ID first.',true);return}
+  store.set('cid',cid);
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getDisplayMedia){log('This browser cannot record the screen. Use Chrome or Edge on a computer.',true);return}
+  try{
+    log('Choose what to share…');
+    // Capture first (needs the click gesture), then sign in
+    const disp=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:15},audio:$('sys').checked});
+    streams=[disp];
+    let micStream=null;
+    if($('mic').checked){
+      try{micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});streams.push(micStream)}
+      catch(e){log('Microphone unavailable, continuing without it.',true)}
+    }
+    // Mix system audio + mic into one track
+    ctx=new AudioContext();const dest=ctx.createMediaStreamDestination();let hasAudio=false;
+    [disp,micStream].forEach(s=>{if(s&&s.getAudioTracks().length){ctx.createMediaStreamSource(new MediaStream(s.getAudioTracks())).connect(dest);hasAudio=true}});
+    const out=new MediaStream([...disp.getVideoTracks(),...(hasAudio?dest.stream.getAudioTracks():[])]);
+    const mime=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'].find(m=>MediaRecorder.isTypeSupported(m));
+
+    const token=await getToken();
+    const name=($('name').value.trim()||'Recording')+'.webm';
+    session=await openSession(token,name,'video/webm');
+
+    pending=new Blob();sent=0;stopping=false;finished=false;elapsed=0;fileId=null;
+    rec=new MediaRecorder(out,{mimeType:mime,videoBitsPerSecond:+$('q').value,audioBitsPerSecond:128000});
+    rec.ondataavailable=e=>{if(e.data&&e.data.size){pending=new Blob([pending,e.data]);ui();pump()}};
+    rec.onstop=()=>{stopping=true;pump()};
+    disp.getVideoTracks()[0].onended=()=>{if(rec&&rec.state!=='inactive')$('end').click()};
+    rec.start(2000);
+    tickStart=Date.now();
+    tick=setInterval(()=>{if(rec.state==='recording')$('timer').textContent=fmt(elapsed+(Date.now()-tickStart)/1000)},500);
+    try{wake=await navigator.wakeLock.request('screen')}catch(e){}
+    window.onbeforeunload=e=>{e.preventDefault();e.returnValue=''};
+    lockUI(true);$('pause').textContent='Pause';st('Recording',true);
+    log(hasAudio?'Recording with audio. Uploading as you go.':'Recording without audio.');
+  }catch(e){cleanup();lockUI(false);st('Ready');log(e.message||String(e),true)}
+};
+
+$('pause').onclick=()=>{
+  if(rec.state==='recording'){
+    rec.pause();elapsed+=(Date.now()-tickStart)/1000;
+    $('pause').textContent='Resume';st('Paused');
+  }else if(rec.state==='paused'){
+    rec.resume();tickStart=Date.now();
+    $('pause').textContent='Pause';st('Recording',true);
+  }
+};
+$('end').onclick=()=>{
+  if(!rec||rec.state==='inactive')return;
+  if(rec.state==='recording')elapsed+=(Date.now()-tickStart)/1000;
+  $('timer').textContent=fmt(elapsed);
+  $('pause').disabled=true;$('end').disabled=true;st('Finishing upload…');
+  streams.forEach(s=>s.getTracks().forEach(t=>t.stop()));
+  rec.stop();
+};
+</script>
+</body>
+</html>
