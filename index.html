@@ -36,11 +36,6 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid 
 #log.err{color:var(--rec)}
 a{color:var(--ok)}
 small{color:var(--mute);font:12px system-ui,sans-serif}
-[hidden]{display:none!important}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
-input[type=range]{width:100%}
-h2{font:700 15px system-ui,sans-serif;margin:0 0 4px}
-#pv{width:100%;border-radius:8px;background:#000;margin-top:12px}
 </style>
 </head>
 <body>
@@ -60,45 +55,10 @@ h2{font:700 15px system-ui,sans-serif;margin:0 0 4px}
     <option value="2000000" selected>Medium: 2 Mbps (about 0.9 GB per hour)</option>
     <option value="4000000">High: 4 Mbps (about 1.8 GB per hour)</option>
   </select>
-  <label for="mode">Mode</label>
-  <select id="mode">
-    <option value="plain">Plain: records the screen exactly as it is (most reliable)</option>
-    <option value="studio">Studio (beta): styled frame, webcam bubble, live zoom</option>
-  </select>
-  <label for="fmt">Format</label>
-  <select id="fmt">
-    <option value="webm">WebM (safest)</option>
-    <option value="mp4">MP4 (Drive can preview it; experimental)</option>
-  </select>
   <div class="row">
     <label><input type="checkbox" id="sys" checked> System or tab audio</label>
     <label><input type="checkbox" id="mic" checked> Microphone</label>
   </div>
-</div>
-
-<div class="panel" id="studio" hidden>
-  <h2>Studio look (change anytime while recording)</h2>
-  <div class="grid">
-    <div><label for="bg">Background</label><select id="bg"><option value="ocean">Ocean</option><option value="sunset">Sunset</option><option value="forest">Forest</option><option value="night">Night</option><option value="light">Light</option><option value="black">Black</option></select></div>
-    <div><label for="ar">Shape</label><select id="ar"><option>16:9</option><option>4:3</option><option>1:1</option><option>9:16</option></select></div>
-    <div><label for="res">Resolution</label><select id="res"><option value="720">720p</option><option value="1080">1080p</option></select></div>
-    <div><label for="pad">Padding</label><input type="range" id="pad" min="0" max="15" value="6"></div>
-    <div><label for="rad">Rounded corners</label><input type="range" id="rad" min="0" max="60" value="18"></div>
-    <div><label><input type="checkbox" id="shd" checked> Drop shadow</label></div>
-    <div><label for="zm">Zoom</label><input type="range" id="zm" min="1" max="3" step="0.1" value="1"></div>
-    <div><label for="fx">Zoom focus: left to right</label><input type="range" id="fx" min="0" max="100" value="50"></div>
-    <div><label for="fy">Zoom focus: top to bottom</label><input type="range" id="fy" min="0" max="100" value="50"></div>
-  </div>
-  <h2 style="margin-top:14px">Webcam bubble</h2>
-  <div class="grid">
-    <div><label><input type="checkbox" id="cam"> Webcam (tick before starting; hide or show anytime)</label></div>
-    <div><label for="cpos">Position</label><select id="cpos"><option>bottom-right</option><option>bottom-left</option><option>top-right</option><option>top-left</option></select></div>
-    <div><label for="csz">Size</label><input type="range" id="csz" min="10" max="35" value="20"></div>
-    <div><label for="csh">Shape</label><select id="csh"><option value="circle">Circle</option><option value="rounded">Rounded square</option></select></div>
-    <div><label><input type="checkbox" id="cmir" checked> Mirror</label></div>
-  </div>
-  <small>Studio draws everything inside this page, so keep this tab open. Zoom uses sliders because browsers can’t see your cursor outside this tab.</small>
-  <video id="pv" muted playsinline hidden></video>
 </div>
 
 <div class="panel">
@@ -112,7 +72,6 @@ h2{font:700 15px system-ui,sans-serif;margin:0 0 4px}
     <button id="end" disabled>End and finish upload</button>
   </div>
   <div id="log"></div>
-  <button id="backup" class="ghost" style="display:none;margin-top:10px">Download unsent video as backup</button>
 </div>
 </main>
 
@@ -126,7 +85,7 @@ const stamp=()=>new Date().toISOString().slice(0,16).replace(/[:T]/g,'-');
 $('name').value='Recording '+stamp();
 
 let rec,streams=[],ctx,session,pending=new Blob(),sent=0,uploading=false,stopping=false,finished=false,
-    elapsed=0,tickStart=0,tick,wake,fileId,failed=false,inflight=null,worker=null,camOpen=false;
+    elapsed=0,tickStart=0,tick,wake,fileId,failed=false;
 
 const log=(m,e)=>{$('log').textContent=m;$('log').className=e?'err':''};
 const mb=n=>(n/1048576).toFixed(n>1e8?0:1);
@@ -182,18 +141,16 @@ async function sendChunk(blob,isLast){
   let attempt=0;
   for(;;){
     try{
-      inflight=blob;
       const start=sent,end=sent+blob.size-1;
       const total=isLast?String(sent+blob.size):'*';
       const range=blob.size?`bytes ${start}-${end}/${total}`:`bytes */${sent}`;
-      const r=await put(blob.size?new Blob([blob]):null,range);
+      const r=await put(blob.size?blob:null,range);
       if(r.status===308){sent+=blob.size;return null}
       if(r.status===200||r.status===201){sent+=blob.size;return JSON.parse(r.text)}
-      throw new Error('Drive replied '+r.status+' '+(r.text||'').replace(/\s+/g,' ').slice(0,160));
+      throw new Error('status '+r.status);
     }catch(e){
       attempt++;
-      log('Upload problem: '+(e.message||e)+' (retry '+attempt+'). Your video is kept safe in memory.',true);
-      if(attempt>=2)$('backup').style.display='inline-block';
+      log('Connection problem, retrying ('+attempt+')… Recording continues.',true);
       await wait(Math.min(30000,1000*attempt));
       try{ // resync with what Drive actually received
         const off=await serverOffset();
@@ -228,15 +185,13 @@ async function pump(){
 function st(t,on){$('st').textContent=t;$('dot').className=on?'on':''}
 function lockUI(running){
   $('start').disabled=running;$('pause').disabled=!running;$('end').disabled=!running;
-  ['cid','name','q','sys','mic','mode','fmt'].forEach(i=>$(i).disabled=running);
+  ['cid','name','q','sys','mic'].forEach(i=>$(i).disabled=running);
 }
 
 function cleanup(){
   clearInterval(tick);streams.forEach(s=>s.getTracks().forEach(t=>t.stop()));streams=[];
   if(ctx){ctx.close();ctx=null}
   if(wake){wake.release().catch(()=>{});wake=null}
-  if(worker){worker.postMessage({t:'stop'});const w=worker;setTimeout(()=>w.terminate(),800);worker=null}
-  $('pv').srcObject=null;$('pv').hidden=true;
   window.onbeforeunload=null;
 }
 function done(){
@@ -244,74 +199,6 @@ function done(){
   const link=fileId?` <a target="_blank" rel="noopener" href="https://drive.google.com/file/d/${fileId}/view">Open in Drive</a>`:'';
   $('log').className='';$('log').innerHTML='Done. '+mb(sent)+' MB uploaded.'+link;
 }
-
-const WSRC=`
-let S={},sf=null,cf=null,W=0,H=0,w,cv,c,zx=1,fx=.5,fy=.5,timer,busy=0;
-const G={ocean:['#0f4c81','#6dd5ed'],sunset:['#ff7e5f','#feb47b'],forest:['#134e5e','#71b280'],night:['#0f0c29','#302b63'],light:['#eef2f3','#cfd9df'],black:['#000','#000']};
-async function pump(r,set){const rd=r.getReader();for(;;){const x=await rd.read();if(x.done)break;set(x.value)}}
-onmessage=async e=>{const m=e.data;
- if(m.t==='set')S=m.s;
- else if(m.t==='stop'){clearInterval(timer);try{await w.close()}catch(_){}}
- else if(m.t==='init'){
-  W=m.W;H=m.H;S=m.s;cv=new OffscreenCanvas(W,H);c=cv.getContext('2d');w=m.out.getWriter();
-  pump(m.screen,f=>{if(sf)sf.close();sf=f});
-  if(m.cam)pump(m.cam,f=>{if(cf)cf.close();cf=f});
-  timer=setInterval(draw,1000/30);
- }};
-async function draw(){
- if(!sf||busy)return;busy=1;
- try{
-  const g=G[S.bg]||G.ocean,gr=c.createLinearGradient(0,0,W,H);gr.addColorStop(0,g[0]);gr.addColorStop(1,g[1]);
-  c.fillStyle=gr;c.fillRect(0,0,W,H);
-  const p=W*S.pad/100,sw=sf.displayWidth,sh=sf.displayHeight,k=Math.min((W-2*p)/sw,(H-2*p)/sh),dw=sw*k,dh=sh*k,dx=(W-dw)/2,dy=(H-dh)/2;
-  zx+=(S.zoom-zx)*.12;fx+=(S.fx/100-fx)*.12;fy+=(S.fy/100-fy)*.12;
-  const cw=sw/zx,ch=sh/zx,cx=Math.min(sw-cw,Math.max(0,fx*sw-cw/2)),cy=Math.min(sh-ch,Math.max(0,fy*sh-ch/2));
-  c.save();
-  if(S.shadow){c.shadowColor='rgba(0,0,0,.45)';c.shadowBlur=W*.03;c.shadowOffsetY=W*.01}
-  c.beginPath();c.roundRect(dx,dy,dw,dh,S.rad*W/1280);c.fillStyle='#000';c.fill();
-  c.shadowColor='transparent';c.clip();
-  c.drawImage(sf,cx,cy,cw,ch,dx,dy,dw,dh);
-  c.restore();
-  if(S.cam&&cf){
-   const cs=W*S.csz/100,m=W*.025,vw=cf.displayWidth,vh=cf.displayHeight,q=Math.min(vw,vh),sx=(vw-q)/2,sy=(vh-q)/2;
-   const x=S.cpos.indexOf('left')>=0?m:W-cs-m,y=S.cpos.indexOf('top')>=0?m:H-cs-m;
-   c.save();c.shadowColor='rgba(0,0,0,.4)';c.shadowBlur=W*.015;
-   c.beginPath();if(S.cshape==='circle')c.arc(x+cs/2,y+cs/2,cs/2,0,7);else c.roundRect(x,y,cs,cs,cs*.18);
-   c.fillStyle='#000';c.fill();c.shadowColor='transparent';c.clip();
-   if(S.cmir){c.translate(x+cs,y);c.scale(-1,1);c.drawImage(cf,sx,sy,q,q,0,0,cs,cs)}else c.drawImage(cf,sx,sy,q,q,x,y,cs,cs);
-   c.restore();
-  }
-  const f=new VideoFrame(cv,{timestamp:Math.round(performance.now()*1000)});
-  try{await w.write(f)}catch(_){}
-  f.close();
- }finally{busy=0}
-}`;
-const settings=()=>({bg:$('bg').value,pad:+$('pad').value,rad:+$('rad').value,shadow:$('shd').checked,zoom:+$('zm').value,fx:+$('fx').value,fy:+$('fy').value,
-  cam:$('cam').checked&&camOpen,cpos:$('cpos').value,csz:+$('csz').value,cshape:$('csh').value,cmir:$('cmir').checked});
-$('mode').onchange=()=>{$('studio').hidden=$('mode').value!=='studio'};
-$('studio').addEventListener('input',()=>{if(worker)worker.postMessage({t:'set',s:settings()})});
-
-async function startStudio(disp){
-  if(!window.MediaStreamTrackProcessor||!window.MediaStreamTrackGenerator)throw new Error('Studio mode needs Chrome or Edge on a computer. Use Plain mode here.');
-  const [a,b]=$('ar').value.split(':').map(Number),r=a/b,n=+$('res').value;
-  const ev=v=>Math.round(v/2)*2,W=r>=1?ev(n*r):n,H=r>=1?n:ev(n/r);
-  camOpen=$('cam').checked;
-  const gen=new MediaStreamTrackGenerator({kind:'video'});
-  const sp=new MediaStreamTrackProcessor({track:disp.getVideoTracks()[0]});
-  let cp=null;
-  if(camOpen){
-    try{const cs=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});streams.push(cs);cp=new MediaStreamTrackProcessor({track:cs.getVideoTracks()[0]})}
-    catch(e){camOpen=false;log('Webcam unavailable, continuing without it.',true)}
-  }
-  worker=new Worker(URL.createObjectURL(new Blob([WSRC],{type:'text/javascript'})));
-  const tr=[sp.readable,gen.writable];if(cp)tr.push(cp.readable);
-  worker.postMessage({t:'init',W,H,s:settings(),screen:sp.readable,cam:cp&&cp.readable,out:gen.writable},tr);
-  return gen;
-}
-$('backup').onclick=()=>{
-  const b=new Blob([inflight||new Blob(),pending],{type:'video/webm'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='unsent-backup.webm';a.click();
-};
 
 $('start').onclick=async()=>{
   const cid=$('cid').value.trim();
@@ -321,7 +208,7 @@ $('start').onclick=async()=>{
   try{
     log('Choose what to share…');
     // Capture first (needs the click gesture), then sign in
-    const disp=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:$('mode').value==='studio'?30:15},audio:$('sys').checked});
+    const disp=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:15},audio:$('sys').checked});
     streams=[disp];
     let micStream=null;
     if($('mic').checked){
@@ -331,19 +218,12 @@ $('start').onclick=async()=>{
     // Mix system audio + mic into one track
     ctx=new AudioContext();const dest=ctx.createMediaStreamDestination();let hasAudio=false;
     [disp,micStream].forEach(s=>{if(s&&s.getAudioTracks().length){ctx.createMediaStreamSource(new MediaStream(s.getAudioTracks())).connect(dest);hasAudio=true}});
-    const aud=hasAudio?dest.stream.getAudioTracks():[];
-    let vid=disp.getVideoTracks();
-    const studioOn=$('mode').value==='studio';
-    if(studioOn){vid=[await startStudio(disp)];$('pv').srcObject=new MediaStream(vid);$('pv').hidden=false;$('pv').play().catch(()=>{})}
-    const out=new MediaStream([...vid,...aud]);
-    const list=$('fmt').value==='mp4'?['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4']:[];
-    list.push('video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm');
-    const mime=list.find(m=>MediaRecorder.isTypeSupported(m));
-    const isMp4=mime.indexOf('video/mp4')===0,base=isMp4?'video/mp4':'video/webm';
+    const out=new MediaStream([...disp.getVideoTracks(),...(hasAudio?dest.stream.getAudioTracks():[])]);
+    const mime=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'].find(m=>MediaRecorder.isTypeSupported(m));
 
     const token=await getToken();
-    const name=($('name').value.trim()||'Recording')+(isMp4?'.mp4':'.webm');
-    session=await openSession(token,name,base);
+    const name=($('name').value.trim()||'Recording')+'.webm';
+    session=await openSession(token,name,'video/webm');
 
     pending=new Blob();sent=0;stopping=false;finished=false;elapsed=0;fileId=null;
     rec=new MediaRecorder(out,{mimeType:mime,videoBitsPerSecond:+$('q').value,audioBitsPerSecond:128000});
@@ -376,7 +256,6 @@ $('end').onclick=()=>{
   $('pause').disabled=true;$('end').disabled=true;st('Finishing upload…');
   streams.forEach(s=>s.getTracks().forEach(t=>t.stop()));
   rec.stop();
-  if(worker)worker.postMessage({t:'stop'});
 };
 </script>
 </body>
